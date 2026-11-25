@@ -1,0 +1,130 @@
+package com.rigmod;
+
+import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.client.gui.screen.ingame.Generic3x3ContainerScreen;
+import net.minecraft.component.DataComponentTypes;
+import net.minecraft.inventory.Inventory;
+import net.minecraft.item.ItemStack;
+import net.minecraft.screen.slot.Slot;
+import net.minecraft.text.Text;
+
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Set;
+
+/**
+ * Builds a purely visual version of a dropper's contents while its screen is being drawn.
+ * With the rig on, only the picked number looks EMPTY and every other number looks
+ * present (even if it really dropped). Works for the host dropper ("N H") and the viewer
+ * dropper ("N V"). Active only during one screen render, never during clicks.
+ */
+public final class RigView {
+    private static final Set<ItemStack> NORMAL = Collections.newSetFromMap(new IdentityHashMap<>());
+    private static final ItemStack[] SNAP_H = new ItemStack[9];
+    private static final ItemStack[] SNAP_V = new ItemStack[9];
+    private static ItemStack[] view;
+    private static Inventory viewInv;
+
+    private RigView() {}
+
+    /** Stacks that belong to the dropper display and must be drawn exactly as they are. */
+    public static boolean isNormal(ItemStack s) {
+        return !NORMAL.isEmpty() && NORMAL.contains(s);
+    }
+
+    /** The last seen real item for this number, or null. */
+    public static ItemStack snapshot(char side, int number) {
+        if (number < 1 || number > 9) return null;
+        ItemStack s = (side == 'V' ? SNAP_V : SNAP_H)[number - 1];
+        return (s == null || s.isEmpty()) ? null : s;
+    }
+
+    public static void begin(Screen screen) {
+        end();
+        if (!RigState.enabled || !(screen instanceof Generic3x3ContainerScreen dropper)) return;
+
+        List<Slot> slots = dropper.getScreenHandler().slots;
+        if (slots.size() < 9) return;
+
+        Inventory inv = slots.get(0).inventory;
+        ItemStack[] real = new ItemStack[9];
+        int hostCount = 0;
+        int viewerCount = 0;
+        for (int i = 0; i < 9; i++) {
+            Slot s = slots.get(i);
+            real[i] = s.inventory.getStack(s.getIndex());
+            RigLogic.Tag t = RigLogic.tag(real[i]);
+            if (t != null) {
+                if (t.side() == 'H') hostCount++;
+                else viewerCount++;
+            }
+        }
+        if (hostCount == 0 && viewerCount == 0) return; // not one of the game droppers
+        char side = hostCount >= viewerCount ? 'H' : 'V';
+
+        // Remember the intact dropper (all 9 present and in order) so items can be shown again later.
+        boolean intact = true;
+        for (int i = 0; i < 9; i++) {
+            RigLogic.Tag t = RigLogic.tag(real[i]);
+            if (t == null || t.side() != side || t.number() != i + 1) {
+                intact = false;
+                break;
+            }
+        }
+        if (intact) {
+            ItemStack[] snap = side == 'V' ? SNAP_V : SNAP_H;
+            for (int i = 0; i < 9; i++) snap[i] = real[i].copy();
+        }
+
+        int pick = RigState.pick(side);
+        ItemStack[] out = new ItemStack[9];
+        for (int i = 0; i < 9; i++) {
+            int n = i + 1;
+            if (n == pick) {
+                out[i] = ItemStack.EMPTY;            // the one that looks dropped
+            } else if (real[i].isEmpty()) {
+                out[i] = fakeFor(i, side, real);     // really dropped, but looks present
+            } else {
+                out[i] = real[i];
+            }
+        }
+
+        view = out;
+        viewInv = inv;
+        for (ItemStack st : out) {
+            if (!st.isEmpty()) NORMAL.add(st);
+        }
+    }
+
+    public static void end() {
+        view = null;
+        viewInv = null;
+        NORMAL.clear();
+    }
+
+    /** Used by the Slot mixin. Returns null when the real stack should be used. */
+    public static ItemStack viewFor(Slot slot) {
+        ItemStack[] v = view;
+        if (v == null || slot.inventory != viewInv) return null;
+        int i = slot.getIndex();
+        if (i < 0 || i > 8) return null;
+        return v[i];
+    }
+
+    private static ItemStack fakeFor(int index, char side, ItemStack[] real) {
+        ItemStack snap = snapshot(side, index + 1);
+        if (snap != null) return snap.copy();
+        for (ItemStack other : real) {
+            RigLogic.Tag t = RigLogic.tag(other);
+            if (t != null && t.side() == side) {
+                ItemStack c = other.copy();
+                c.setCount(1);
+                c.set(DataComponentTypes.CUSTOM_NAME,
+                    Text.literal((index + 1) + " " + side).setStyle(other.getName().getStyle()));
+                return c;
+            }
+        }
+        return ItemStack.EMPTY;
+    }
+}
